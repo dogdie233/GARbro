@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.ComponentModel.Composition;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 using GameRes.Formats.GUI;
@@ -10,11 +11,6 @@ using GameRes.Utility;
 
 namespace GameRes.Formats.NekoNyan
 {
-    public class SpriteGameOptions : ResourceOptions
-    {
-        public SpriteGameDatabase.Item SelectedItem { get; set; }
-    }
-    
     public class SpriteArcEntry : PackedEntry
     {
         public SpriteGameDatabase.Item Game { get; set; }
@@ -34,13 +30,12 @@ namespace GameRes.Formats.NekoNyan
             const int headerSize = 1024;
             if (view.MaxOffset < headerSize)
                 return null;  // file too small
-            
-            var options = Query<SpriteGameOptions>("NekoNyan/Sprite Game?");
-            if (options?.SelectedItem == null)
-                return null;  // User canceled;
+
+            if (!TryIdentifyGame(view, out var game))
+                return null;  // not a known game
             
             var fileCount = 0;
-            for (var i = options.SelectedItem.DecryParam.fileCountBeginByte; i < headerSize - 4; i += 4)
+            for (var i = game.DecryParam.fileCountBeginByte; i < headerSize - 4; i += 4)
                 fileCount += view.View.ReadInt32(i);
 
             if (fileCount == 0)
@@ -60,7 +55,7 @@ namespace GameRes.Formats.NekoNyan
                 if (view.View.Read(headerSize, tocBuffer, 0, (uint)tocSize) != tocSize)
                     return null;  // file too small
                 
-                SpriteDecryptionUtils.Decrypt(new Span<byte>(tocBuffer, 0, tocSize), seed1, options.SelectedItem.DecryParam);
+                SpriteDecryptionUtils.Decrypt(new Span<byte>(tocBuffer, 0, tocSize), seed1, game.DecryParam);
 
                 var contentOffset = BitConverter.ToInt32(tocBuffer, 12);
                 var constSize = contentOffset - (headerSize + tocSize);
@@ -73,7 +68,7 @@ namespace GameRes.Formats.NekoNyan
                     if (view.View.Read(headerSize + tocSize, constBuffer, 0, (uint)constSize) != constSize)
                         return null;  // file too small
                     
-                    SpriteDecryptionUtils.Decrypt(new Span<byte>(constBuffer, 0, constSize), seed2, options.SelectedItem.DecryParam);
+                    SpriteDecryptionUtils.Decrypt(new Span<byte>(constBuffer, 0, constSize), seed2, game.DecryParam);
 
                     for (var i = 0; i < fileCount; i++)
                     {
@@ -89,7 +84,7 @@ namespace GameRes.Formats.NekoNyan
                         var name = Encoding.ASCII.GetString(constBuffer, constAddr, cnt);
                         entries.Add(new SpriteArcEntry
                         {
-                            Game = options.SelectedItem,
+                            Game = game,
                             Name = name,
                             Offset = dataAddr,
                             Size = size,
@@ -110,29 +105,26 @@ namespace GameRes.Formats.NekoNyan
             
             return new SpriteDecryptionStream(arc.File.CreateStream(entry.Offset, entry.Size), spriteEntry.Key, spriteEntry.Game.DecryParam);
         }
-
-        public override object GetAccessWidget()
+        
+        private static bool TryIdentifyGame(ArcView view, out SpriteGameDatabase.Item game)
         {
-            return new WidgetSpriteGameChoice();
-        }
+            game = null;
+            var info_name = VFS.CombinePath(VFS.GetDirectoryName(view.Name), "app.info");
+            if (!File.Exists(info_name))
+                return false;
 
-        public override ResourceOptions GetDefaultOptions()
-        {
-            return new SpriteGameOptions();
-        }
-
-        public override ResourceOptions GetOptions(object widget)
-        {
-            if (!(widget is WidgetSpriteGameChoice spriteWidget))
-                return GetDefaultOptions();
-
-            if (!(spriteWidget.Scheme.SelectedItem is KeyValuePair<string, SpriteGameDatabase.Item> kvp))
-                return null;
-
-            return new SpriteGameOptions
+            using (var sr = new StreamReader(info_name, Encoding.UTF8))
             {
-                SelectedItem = kvp.Value
-            };
+                var company = sr.ReadLine();
+                var product = sr.ReadLine();
+                
+                if (string.IsNullOrEmpty(company) || string.IsNullOrEmpty(product))
+                    return false;
+                
+                game = SpriteGameDatabase.Games.FirstOrDefault(item => item.AppInfoCompany == company && item.AppInfoProduct == product);
+            }
+            
+            return game != null;
         }
     }
     
@@ -298,22 +290,23 @@ namespace GameRes.Formats.NekoNyan
         
         public class Item
         {
-            public string Name { get; }
+            public string AppInfoCompany { get; } = "NekoNyanSoft";
+            public string AppInfoProduct { get; set; }
             public DecryParams DecryParam { get; } 
 
-            public Item(string name, DecryParams param)
+            public Item(string appInfoProduct, DecryParams param)
             {
-                Name = name;
+                AppInfoProduct = appInfoProduct;
                 DecryParam = param;
             }
         }
 
         public static readonly Item[] Games =
         {
-            new Item("Aokana - Four Rhythms Across the Blue -", new DecryParams(16, 0x1CDFU, 0xA74CU, 17, 56U, 239U, 1, 0xFD, 3, 0x59, 0x99)),
-            new Item("Aokana - Four Rhythms Across the Blue - EXTRA1", new DecryParams(16, 0x1CDFU, 0xA74CU, 17, 56U, 239U, 1, 0xFD, 3, 0x59, 0x99)),
-            new Item("Aokana - Four Rhythms Across the Blue - EXTRA2", new DecryParams(12, 0x131CU, 0xA740U, 7, 0x9CU, 0xCEU, 3, 0xB3, 3, 0x59, 0x77)),
-            new Item("Love, Elections, and Chocolate", new DecryParams(12, 0x1704U, 0xA140U, 7, 0x155U, 0xDCU, 2, 0xEB, 31, 0x57, 0xA5))
+            new Item("Aokana", new DecryParams(16, 0x1CDFU, 0xA74CU, 17, 56U, 239U, 1, 0xFD, 3, 0x59, 0x99)),
+            new Item("AokanaEXTRA2", new DecryParams(16, 0x1CDFU, 0xA74CU, 17, 56U, 239U, 1, 0xFD, 3, 0x59, 0x99)),
+            new Item("AokanaEXTRA2", new DecryParams(12, 0x131CU, 0xA740U, 7, 0x9CU, 0xCEU, 3, 0xB3, 3, 0x59, 0x77)),
+            new Item("KoiChoco", new DecryParams(12, 0x1704U, 0xA140U, 7, 0x155U, 0xDCU, 2, 0xEB, 31, 0x57, 0xA5))
         };
     }
 }

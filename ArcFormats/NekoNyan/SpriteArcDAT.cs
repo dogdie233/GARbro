@@ -13,18 +13,74 @@ namespace GameRes.Formats.NekoNyan
 {
     public class SpriteArcEntry : PackedEntry
     {
-        public SpriteGameDatabase.Item Game { get; set; }
+        public SpriteDecryptParams DecryptParams { get; set; }
         public uint Key { get; set; }
     }
-    
+
+    [Serializable]
+    public class SpriteScheme : ResourceScheme
+    {
+        public Dictionary<string, SpriteDecryptParams> KnownGame = new Dictionary<string, SpriteDecryptParams>();
+    }
+
+    [Serializable]
+    public class SpriteDecryptParams
+    {
+        public readonly long fileCountBeginByte;
+        public readonly uint genKeyInitMul;
+        public readonly uint genKeyInitAdd;
+        public readonly int genKeyInitShift;
+        public readonly uint genKeyRoundAdd;
+        public readonly uint genKeyRoundAnd;
+        public readonly int genKeyRoundShift;
+
+        public readonly long decryMod1;
+        public readonly byte decryAdd;
+        public readonly long decryMod2;
+        public readonly byte decryXor;
+
+        public SpriteDecryptParams(long fileCountBeginByte,
+            uint genKeyInitMul,
+            uint genKeyInitAdd,
+            int genKeyInitShift,
+            uint genKeyRoundAdd,
+            uint genKeyRoundAnd,
+            int genKeyRoundShift,
+            long decryMod1,
+            byte decryAdd,
+            long decryMod2,
+            byte decryXor)
+        {
+            this.fileCountBeginByte = fileCountBeginByte;
+            this.genKeyInitMul = genKeyInitMul;
+            this.genKeyInitAdd = genKeyInitAdd;
+            this.genKeyInitShift = genKeyInitShift;
+            this.genKeyRoundAdd = genKeyRoundAdd;
+            this.genKeyRoundAnd = genKeyRoundAnd;
+            this.genKeyRoundShift = genKeyRoundShift;
+            this.decryMod1 = decryMod1;
+            this.decryAdd = decryAdd;
+            this.decryMod2 = decryMod2;
+            this.decryXor = decryXor;
+        }
+    }
+
     [Export(typeof(ArchiveFormat))]
     public class SpriteArcDAT : ArchiveFormat
-    {        
+    {
+        private SpriteScheme m_scheme = new SpriteScheme();
+        
         public override string Tag { get; } = "DAT/NEKONYAN/SPRITE";
         public override string Description { get; } = "NEKONYAN/SPRITE resource archive";
         public override uint Signature { get; } = 0x00000000;
         public override bool IsHierarchic { get; } = true;
-        
+
+        public override ResourceScheme Scheme
+        {
+            get => m_scheme;
+            set => m_scheme = (SpriteScheme)value;
+        }
+
         public override ArcFile TryOpen(ArcView view)
         {
             const int headerSize = 1024;
@@ -35,7 +91,7 @@ namespace GameRes.Formats.NekoNyan
                 return null;  // not a known game
             
             var fileCount = 0;
-            for (var i = game.DecryParam.fileCountBeginByte; i < headerSize - 4; i += 4)
+            for (var i = game.fileCountBeginByte; i < headerSize - 4; i += 4)
                 fileCount += view.View.ReadInt32(i);
 
             if (fileCount == 0)
@@ -55,7 +111,7 @@ namespace GameRes.Formats.NekoNyan
                 if (view.View.Read(headerSize, tocBuffer, 0, (uint)tocSize) != tocSize)
                     return null;  // file too small
                 
-                SpriteDecryptionUtils.Decrypt(new Span<byte>(tocBuffer, 0, tocSize), seed1, game.DecryParam);
+                SpriteDecryptionUtils.Decrypt(new Span<byte>(tocBuffer, 0, tocSize), seed1, game);
 
                 var contentOffset = BitConverter.ToInt32(tocBuffer, 12);
                 var constSize = contentOffset - (headerSize + tocSize);
@@ -68,7 +124,7 @@ namespace GameRes.Formats.NekoNyan
                     if (view.View.Read(headerSize + tocSize, constBuffer, 0, (uint)constSize) != constSize)
                         return null;  // file too small
                     
-                    SpriteDecryptionUtils.Decrypt(new Span<byte>(constBuffer, 0, constSize), seed2, game.DecryParam);
+                    SpriteDecryptionUtils.Decrypt(new Span<byte>(constBuffer, 0, constSize), seed2, game);
 
                     for (var i = 0; i < fileCount; i++)
                     {
@@ -84,7 +140,7 @@ namespace GameRes.Formats.NekoNyan
                         var name = Encoding.ASCII.GetString(constBuffer, constAddr, cnt);
                         entries.Add(new SpriteArcEntry
                         {
-                            Game = game,
+                            DecryptParams = game,
                             Name = name,
                             Offset = dataAddr,
                             Size = size,
@@ -103,28 +159,26 @@ namespace GameRes.Formats.NekoNyan
             if (!(entry is SpriteArcEntry spriteEntry))
                 return arc.File.CreateStream (entry.Offset, entry.Size);
             
-            return new SpriteDecryptionStream(arc.File.CreateStream(entry.Offset, entry.Size), spriteEntry.Key, spriteEntry.Game.DecryParam);
+            return new SpriteDecryptionStream(arc.File.CreateStream(entry.Offset, entry.Size), spriteEntry.Key, spriteEntry.DecryptParams);
         }
-        
-        private static bool TryIdentifyGame(ArcView view, out SpriteGameDatabase.Item game)
+
+        private bool TryIdentifyGame(ArcView view, out SpriteDecryptParams decryptParams)
         {
-            game = null;
-            var info_name = VFS.CombinePath(VFS.GetDirectoryName(view.Name), "app.info");
-            if (!File.Exists(info_name))
+            decryptParams = null;
+            var infoPath = VFS.CombinePath(VFS.GetDirectoryName(view.Name), "app.info");
+            if (!File.Exists(infoPath))
                 return false;
 
-            using (var sr = new StreamReader(info_name, Encoding.UTF8))
+            using (var sr = new StreamReader(infoPath, Encoding.UTF8))
             {
                 var company = sr.ReadLine();
                 var product = sr.ReadLine();
-                
+
                 if (string.IsNullOrEmpty(company) || string.IsNullOrEmpty(product))
                     return false;
-                
-                game = SpriteGameDatabase.Games.FirstOrDefault(item => item.AppInfoCompany == company && item.AppInfoProduct == product);
+
+                return m_scheme.KnownGame.TryGetValue($"{company}/{product}", out decryptParams);
             }
-            
-            return game != null;
         }
     }
     
@@ -132,14 +186,14 @@ namespace GameRes.Formats.NekoNyan
     {
         public const int KeyTableSize = 256;
         
-        public static void Decrypt(Span<byte> data, uint key, in SpriteGameDatabase.DecryParams decryParams, long baseIndex = 0)
+        public static void Decrypt(Span<byte> data, uint key, SpriteDecryptParams decryParams, long baseIndex = 0)
         {
             Span<byte> keyTable = stackalloc byte[KeyTableSize];
             GenerateKeyTable(keyTable, key, decryParams);
             Decrypt(data, keyTable, decryParams, baseIndex);
         }
 
-        public static void Decrypt(Span<byte> data, Span<byte> keyTable, in SpriteGameDatabase.DecryParams decryParams, long baseIndex = 0)
+        public static void Decrypt(Span<byte> data, Span<byte> keyTable, SpriteDecryptParams decryParams, long baseIndex = 0)
         {
             if (keyTable.Length != KeyTableSize)
                 ThrowInvalidKeyTable();
@@ -156,7 +210,7 @@ namespace GameRes.Formats.NekoNyan
             }
         }
         
-        public static void GenerateKeyTable(Span<byte> keyTable, uint seed, in SpriteGameDatabase.DecryParams decryParams)
+        public static void GenerateKeyTable(Span<byte> keyTable, uint seed, in SpriteDecryptParams decryParams)
         {
             if (keyTable.Length != KeyTableSize)
                 ThrowInvalidKeyTable();
@@ -187,9 +241,9 @@ namespace GameRes.Formats.NekoNyan
     {
         private Stream m_baseStream;
         private byte[] m_keyTable;
-        private SpriteGameDatabase.DecryParams m_decryParams;
+        private SpriteDecryptParams m_decryParams;
         
-        public SpriteDecryptionStream(Stream encryptedSource, uint decryptionKey, in SpriteGameDatabase.DecryParams decryParams)
+        public SpriteDecryptionStream(Stream encryptedSource, uint decryptionKey, SpriteDecryptParams decryParams)
         {
             m_baseStream = encryptedSource;
             m_decryParams = decryParams;
@@ -243,70 +297,5 @@ namespace GameRes.Formats.NekoNyan
             get => m_baseStream.Position;
             set => m_baseStream.Position = value;
         }
-    }
-    
-    public static class SpriteGameDatabase
-    {
-        public struct DecryParams
-        {
-            public long fileCountBeginByte;
-            public readonly uint genKeyInitMul;
-            public readonly uint genKeyInitAdd;
-            public readonly int genKeyInitShift;
-            public readonly uint genKeyRoundAdd;
-            public readonly uint genKeyRoundAnd;
-            public readonly int genKeyRoundShift;
-
-            public readonly long decryMod1;
-            public readonly byte decryAdd;
-            public readonly long decryMod2;
-            public readonly byte decryXor;
-
-            public DecryParams(long fileCountBeginByte,
-                uint genKeyInitMul,
-                uint genKeyInitAdd,
-                int genKeyInitShift,
-                uint genKeyRoundAdd,
-                uint genKeyRoundAnd,
-                int genKeyRoundShift,
-                long decryMod1,
-                byte decryAdd,
-                long decryMod2,
-                byte decryXor)
-            {
-                this.fileCountBeginByte = fileCountBeginByte;
-                this.genKeyInitMul = genKeyInitMul;
-                this.genKeyInitAdd = genKeyInitAdd;
-                this.genKeyInitShift = genKeyInitShift;
-                this.genKeyRoundAdd = genKeyRoundAdd;
-                this.genKeyRoundAnd = genKeyRoundAnd;
-                this.genKeyRoundShift = genKeyRoundShift;
-                this.decryMod1 = decryMod1;
-                this.decryAdd = decryAdd;
-                this.decryMod2 = decryMod2;
-                this.decryXor = decryXor;
-            }
-        }
-        
-        public class Item
-        {
-            public string AppInfoCompany { get; } = "NekoNyanSoft";
-            public string AppInfoProduct { get; set; }
-            public DecryParams DecryParam { get; } 
-
-            public Item(string appInfoProduct, DecryParams param)
-            {
-                AppInfoProduct = appInfoProduct;
-                DecryParam = param;
-            }
-        }
-
-        public static readonly Item[] Games =
-        {
-            new Item("Aokana", new DecryParams(16, 0x1CDFU, 0xA74CU, 17, 56U, 239U, 1, 0xFD, 3, 0x59, 0x99)),
-            new Item("AokanaEXTRA2", new DecryParams(16, 0x1CDFU, 0xA74CU, 17, 56U, 239U, 1, 0xFD, 3, 0x59, 0x99)),
-            new Item("AokanaEXTRA2", new DecryParams(12, 0x131CU, 0xA740U, 7, 0x9CU, 0xCEU, 3, 0xB3, 3, 0x59, 0x77)),
-            new Item("KoiChoco", new DecryParams(12, 0x1704U, 0xA140U, 7, 0x155U, 0xDCU, 2, 0xEB, 31, 0x57, 0xA5))
-        };
     }
 }

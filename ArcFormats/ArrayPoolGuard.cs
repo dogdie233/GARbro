@@ -53,15 +53,15 @@ namespace GameRes.Utility
     internal static class ArrayPoolExtension
     {
         /// <summary>
-        /// 配合using语句使用，从pool中借出数组，并在using结束时自动归还
+        /// Used in conjunction with the using statement to borrow arrays from the pool and automatically return it at the end of using
         /// </summary>
-        /// <param name="pool">数组池</param>
-        /// <param name="minimumLength">数组最小的长度</param>
-        /// <typeparam name="T">元素类型</typeparam>
-        /// <returns>一个<see cref="ArrayPoolGuard{T}"/>，用于在Dispose方法被调用时归还数组到对象池</returns>
-        public static ArrayPoolGuard<T> RentSafe<T>(this ArrayPool<T> pool, int minimumLength)
+        /// <param name="pool">The array pool rent from</param>
+        /// <param name="min_length">The minimum size of the array</param>
+        /// <typeparam name="T">Array element type</typeparam>
+        /// <returns>An <see cref="ArrayPoolGuard{T}"/> struct，it will return the array to the pool when disposed being invoked</returns>
+        public static ArrayPoolGuard<T> RentSafe<T>(this ArrayPool<T> pool, int min_length)
         {
-            return new ArrayPoolGuard<T>(pool, minimumLength);
+            return new ArrayPoolGuard<T>(pool, min_length);
         }
     }
 }
